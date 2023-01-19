@@ -5,8 +5,8 @@ import itertools
 from pathlib import Path
 import pickle
 import struct
-
-
+import google.cloud
+from google.cloud import storage
 
 
 # Let's start with a small block size of 30 bytes just to test things out.

@@ -15,11 +15,7 @@ from gensim.utils import simple_preprocess
 
 RE_WORD = re.compile(r"""[\#\@\w](['\-]?\w){2,24}""", re.UNICODE)
 stopwords_frozen = frozenset(stopwords.words('english'))
-corpus_stopwords = ["category", "references", "also", "external", "links",
-                    "may", "first", "see", "history", "people", "one", "two",
-                    "part", "thumb", "including", "second", "following",
-                    "many", "however", "would", "became"]
-all_stopwords = stopwords_frozen.union(corpus_stopwords)
+
 
 def tokenize(text):
     """
@@ -32,9 +28,12 @@ def tokenize(text):
         Returns:;
         list of tokens (e.g., list of tokens).
         """
-    global all_stopwords
+    corpus_stopwords = ["category", "references", "also", "external", "links",
+                        "may", "first", "see", "history", "people", "one", "two",
+                        "part", "thumb", "including", "second", "following",
+                        "many", "however", "would", "became"]
     list_of_tokens = [token.group() for token in RE_WORD.finditer(text.lower()) if
-                      token.group() not in all_stopwords]
+                      token.group() not in stopwords_frozen and token.group() not in corpus_stopwords]
     return list_of_tokens
 
 
@@ -80,9 +79,8 @@ class SearchHandler:
             "title": self.handler.get_inverted_index(source_idx=f"postings_title/index.pkl",
                                                      dest_file=f"title_index.pkl"),
             "titles_dict": self.handler.load_pickle_file(source=f"titles_dict.pkl", dest=f"titles_dict.pkl"),
-            # "page_rank": self.handler.load_pickle_file(source=f"pageRank.pickle", dest=f"pageRank.pkl")
+            "page_rank": self.handler.load_csv_file_dict(),
             "norm": self.handler.load_pickle_file_dict(source=f"doc_norms.pkl", dest=f"norm_dict.pkl"),
-            # "idf": self.handler.load_pickle_file(source=f"idf_text.pkl", dest=f"idf_text.pkl"),
             "page_view": self.handler.load_pickle_file_dict(source=f"page_views.pkl", dest=f"page_views.pkl"),
             "doc_len": self.handler.load_pickle_file_dict(source=f"doc_len.pkl", dest=f"doc_len.pkl"),
             "anchor": self.handler.get_inverted_index(source_idx=f"postings_anchor_text/index.pkl",
@@ -92,16 +90,38 @@ class SearchHandler:
         }
 
     def search(self, q):
-        text = preprocess(q)
-        model = Word2Vec(text, window=5, min_count=1, workers=4)
-        expand_tokens = query_expansion(text, model, 1)
-        print(expand_tokens)
+        body_res = self.search_body(q)
+        title_res = self.search_title(q)
+        body_w = 4
+        title_w = 1.8
+        norm_body = dict((doc_id, score * body_w) for doc_id, score in body_res)
+        norm_title = dict((doc_id, score * title_w) for doc_id, score in title_res)
+        inter = set(norm_title.keys()) & set(norm_body.keys())
+        res = defaultdict(list)
+        for doc_id in inter:
+            res[doc_id] = norm_body[doc_id]+norm_title[doc_id]
+        if len(res.keys()) == 0:
+            res = norm_body
+        sorted_d = get_top_n(res,10)
+        ans = []
+        doc_id_title = self.inverted_index["titles_dict"]
+        for key, val in sorted_d:
+            if key in doc_id_title.keys():
+                ans.append((int(key), doc_id_title[key]))
+            else:
+                ans.append((int(key), str(key)))
+        return ans
+
+
+
+
+
 
     def search_body2(self, q):
         epsilon = 0.000001
         query = tokenize(q)
         idx_body = self.inverted_index["body"]
-        #DL = self.inverted_index["body"].doc_count
+        # DL = self.inverted_index["body"].doc_count
         DL = len(self.inverted_index["doc_len"].keys())
         Q = generate_query_tfidf_vector(query, idx_body, DL)
         dic = defaultdict(list)
@@ -116,7 +136,7 @@ class SearchHandler:
         for word, post in dic.items():
             for doc_id, tf in dic[word]:
                 if doc_id_len[doc_id] > 0:
-                    candidates[(doc_id, word)] = (tf / doc_id_len[doc_id]) * math.log(DL / idx_body.df[word]+epsilon)
+                    candidates[(doc_id, word)] = (tf / doc_id_len[doc_id]) * math.log(DL / idx_body.df[word] + epsilon)
 
         D = generate_document_tfidf_matrix(query, idx_body, candidates)
         print(D.head())
@@ -124,7 +144,7 @@ class SearchHandler:
         top_n = get_top_n(cos_sin, 5)
 
         res = []
-        for doc,score in top_n:
+        for doc, score in top_n:
             try:
                 res.append((doc, self.inverted_index["titles_dict"][doc]))
             except:
@@ -146,12 +166,12 @@ class SearchHandler:
         result : List[Tuples(doc_id, title)]
         """
         # Tokenize the query
-        #idf = self.inverted_index["idf"]
-        epsilon = .0000001
+        # idf = self.inverted_index["idf"]
+        epsilon = .000001
         query = tokenize(q)
         dic = defaultdict(list)
         # Read inverted index from the bucket
-        idx_body = self.inverted_index["body"].read_index('.', 'text_index')
+        idx_body = self.inverted_index["body"]
         doc_count = len(self.inverted_index["doc_len"].keys())
         doc_len = self.inverted_index["doc_len"]
         Q = generate_query_tfidf_vector(query, idx_body, doc_count)
@@ -160,49 +180,43 @@ class SearchHandler:
         # Make a dictionary with the term and its posting list
         cos_dict = {}
         for w in query:
-            pos_lst = self.handler.read_posting_list(idx_body, w, index)
-            dic[w] = pos_lst
+            if w in idx_body.df.keys():
+                pos_lst = self.handler.read_posting_list(idx_body, w, index)
+                dic[w] = pos_lst
 
         # Calculate tf_idf for each document
         tfidf_doc_dict = {}
+        i = 0
         for word, post in dic.items():
             for doc_id, tf in dic[word]:
-                tfidf = (tf / doc_len[doc_id]) * math.log((doc_count / idx_body.df[word]), 10)
-                tfidf_doc_dict[(doc_id, word)] = tfidf
-                #print(tfidf)
+                if doc_id not in tfidf_doc_dict:
+                    tfidf_doc_dict[doc_id] = [0 for _ in range(len(query))]
+                idf = math.log(doc_count / (idx_body.df[word] + epsilon))
+                if doc_id in doc_len.keys():
+                    norm_tf = tf / doc_len[doc_id]
+                else:
+                    norm_tf = tf / 319.52423534118395
+                tfidf_doc_dict[doc_id][i] = norm_tf * idf
+            i += 1
 
-                # if doc_id not in cos_dict:
-                #     cos_dict[doc_id] = np.dot(tfidf, Q)
-                # else:
-                #     cos_dict[doc_id] = cos_dict[doc_id] + np.dot(tfidf, Q[word])
-
-        doc_unq = np.unique([doc_id for doc_id, w in tfidf_doc_dict.keys()])
-        D = pd.DataFrame(columns=query, index=doc_unq)
-        # D.index = unique_candidates
-        # D.columns = index.term_total.keys()
-
-        for key in tfidf_doc_dict:
-            tfidf = tfidf_doc_dict[key]
-            doc_id, term = key
-            D.loc[doc_id, term] = tfidf
-
-        D = D.fillna(0)
+        doc_unq = np.unique([doc_id for doc_id in tfidf_doc_dict.keys()])
         doc_norm = self.inverted_index["norm"]
         result_dict = {}
         q_norm = np.linalg.norm(list(Q))
-        for doc_id in D.index:
-            if doc_id in doc_unq:
-                cos_sim = np.dot(D.loc[doc_id], Q) / (doc_norm[doc_id]*q_norm)
-                result_dict[doc_id] = cos_sim
+        for doc_id in doc_unq:
+            cos_sim = np.dot(tfidf_doc_dict[doc_id], Q) / (doc_norm[doc_id] * q_norm+epsilon)
+            result_dict[doc_id] = cos_sim
 
-        sorted_d = sorted(result_dict.items(), key=lambda x: x[1], reverse=True)
-        sorted_d = dict(sorted_d)
-        sorted_keys = list(sorted_d.keys())
-        res = []
-        for key in sorted_keys:
-            if key in self.inverted_index["titles_dict"].keys():
-                res.append((key, self.inverted_index["titles_dict"][key]))
-        return res[:5]
+        sorted_d = get_top_n(result_dict, 20)
+        return sorted_d
+
+
+        """res = []
+        doc_id_title = self.inverted_index["titles_dict"]
+        for key, val in sorted_d:
+            if key in doc_id_title.keys():
+                res.append((str(key), doc_id_title[key]))
+        return res"""
 
     def search_title(self, q):
         """
@@ -221,12 +235,13 @@ class SearchHandler:
         query = tokenize(q)
         index = "title"
         # Read inverted index from the bucket
-        idx_title = self.inverted_index["title"].read_index('.', 'title_index')
+        idx_title = self.inverted_index["title"]
         dic = defaultdict(list)
         title_ranking = {}
 
         for w in query:
-            dic[w] = self.handler.read_posting_list(idx_title, w, index)
+            if w in idx_title.df.keys():
+                dic[w] = self.handler.read_posting_list(idx_title, w, index)
 
         for key, val in dic.items():
             for doc_id, count in val:
@@ -234,13 +249,12 @@ class SearchHandler:
                     title_ranking[doc_id] = 0
                 title_ranking[doc_id] = title_ranking[doc_id] + 1
 
-        sorted_d = dict(sorted(title_ranking.items(), key=lambda item: item[1], reverse=True))
-        sorted_keys = list(sorted_d.keys())
-
-        res = []
+        sorted_d = get_top_n(title_ranking,10)
+        return sorted_d
+        """res = []
         for key in sorted_keys:
-            res.append((key, self.inverted_index["titles_dict"].get(key,0)))
-        return res
+            res.append((key, self.inverted_index["titles_dict"].get(key, 0)))
+        return res"""
 
     def search_anchor(self, q):
         """
@@ -259,7 +273,7 @@ class SearchHandler:
         index = "anchor_text"
         dic = defaultdict(list)
         # Read inverted index from the bucket
-        idx_anchor = self.inverted_index["anchor"].read_index('.', 'anchor_index')
+        idx_anchor = self.inverted_index["anchor"]
 
         dic = defaultdict(list)
         anchor_ranking = {}
@@ -279,10 +293,8 @@ class SearchHandler:
             res.append((key, self.inverted_index["titles_dict"].get(key, 0)))
         return res
 
-
     def get_page_rank(self, docs):
         res = []
-
         for doc in docs:
             res.append(self.inverted_index["page_rank"][doc])
         return res
@@ -321,15 +333,16 @@ def generate_query_tfidf_vector(query_to_search, index, DL):
     counter = Counter(query_to_search)
     dic = {}
     for token in np.unique(query_to_search):
-        tf = counter[token] / len(query_to_search)  # term frequency divded by the length of the query
-        df = index.df[token]
-        idf = math.log((DL) / (df + epsilon), 10)  # smoothing
-        try:
-            ind = term_vector.index(token)
-            Q[ind] = tf * idf
-            dic[token] = tf * idf
-        except Exception as e:
-            print("In generate query tfidf", e)
+        if token in index.df.keys():
+            tf = counter[token] / len(query_to_search)  # term frequency divded by the length of the query
+            df = index.df[token]
+            idf = math.log((DL) / (df + epsilon), 10)  # smoothing
+            try:
+                ind = term_vector.index(token)
+                Q[ind] = tf * idf
+                dic[token] = tf * idf
+            except Exception as e:
+                print("In generate query tfidf", e)
 
     return Q
 
@@ -396,7 +409,7 @@ def generate_document_tfidf_matrix(query_to_search, index, candidates):
     total_vocab_size = len(index.term_total)
     candidates_scores = candidates
     unique_candidates = np.unique([doc_id for doc_id, freq in candidates_scores.keys()])
-    #D = csr_matrix(total_vocab_size, len(unique_candidates))
+    # D = csr_matrix(total_vocab_size, len(unique_candidates))
     D = pd.DataFrame(columns=query_to_search, index=unique_candidates)
     # D.index = unique_candidates
     # D.columns = index.term_total.keys()
@@ -440,7 +453,7 @@ def cosine_similarity(D, Q):
     return result_dict
 
 
-def get_top_n(sim_dict, N=3):
+def get_top_n(sim_dict, N):
     """
     Sort and return the highest N documents according to the cosine similarity score.
     Generate a dictionary of cosine similarity scores
@@ -458,5 +471,54 @@ def get_top_n(sim_dict, N=3):
     a ranked list of pairs (doc_id, score) in the length of N.
     """
 
-    return sorted([(doc_id, round(score, 5)) for doc_id, score in sim_dict.items()], key=lambda x: x[1], reverse=False)[
+    return sorted([(doc_id, round(score, 5)) for doc_id, score in sim_dict.items()], key=lambda x: x[1], reverse=True)[
            :N]
+
+def merge_results(title_scores, body_scores, title_weight=0.5, text_weight=0.5, N=3):
+    """
+    This function merge and sort documents retrieved by its weighte score (e.g., title and body).
+    Parameters:
+    -----------
+    title_scores: a dictionary build upon the title index of queries and tuples representing scores as follows:
+                                                                            key: query_id
+                                                                            value: list of pairs in the following format:(doc_id,score)
+    body_scores: a dictionary build upon the body/text index of queries and tuples representing scores as follows:
+                                                                            key: query_id
+                                                                            value: list of pairs in the following format:(doc_id,score)
+    title_weight: float, for weigted average utilizing title and body scores
+    text_weight: float, for weigted average utilizing title and body scores
+    N: Integer. How many document to retrieve. This argument is passed to topN function. By default N = 3, for the topN function.
+    Returns:
+    -----------
+    dictionary of querires and topN pairs as follows:
+                                                        key: query_id
+                                                        value: list of pairs in the following format:(doc_id,score).
+    """
+    # YOUR CODE HERE
+    new_dict = {}
+    for query_id in (set(title_scores.keys()) | set(body_scores.keys())):
+        ts = [(doc_id, score * title_weight) for doc_id, score in title_scores[query_id]]
+        bs = [(doc_id, score * text_weight) for doc_id, score in body_scores[query_id]]
+        title_dict = {}
+        body_dict = {}
+        for doc_id, score in ts:
+            title_dict.setdefault(doc_id, []).append(score)
+        for doc_id, score in bs:
+            body_dict.setdefault(doc_id, []).append(score)
+        inter = set(title_dict.keys()) & set(body_dict.keys())
+        diff = (set(title_dict.keys()) | set(body_dict.keys())) - (set(title_dict.keys()) & set(body_dict.keys()))
+        if len(diff) > 0:
+            res_list = []
+            for key in list(diff):
+                if key in title_dict.keys():
+                    res_list.append((key, title_dict[key][0]))
+                else:
+                    res_list.append((key, body_dict[key][0]))
+            new_dict[query_id] = sorted(res_list, key=lambda x: x[1], reverse=True)
+        else:
+            new_dict[query_id] = []
+        for doc_id in inter:
+            new_dict[query_id] += [(doc_id, title_dict[doc_id][0] + body_dict[doc_id][0])]
+    for query_id, query in new_dict.items():
+        new_dict[query_id] = sorted(new_dict[query_id], key=lambda x: x[1], reverse=True)[:N]
+    return new_dict

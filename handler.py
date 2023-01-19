@@ -1,6 +1,6 @@
 from inverted_index_proj import InvertedIndex, MultiFileReader
 import struct
-
+import pandas as pd
 import os
 import google
 from google.cloud import storage
@@ -75,6 +75,11 @@ class ReadFromGcp:
             doc_id_list = json.load(f)
         return doc_id_list
 
+
     def get_json_from_gcp(self, source, dest):
         blob = self.bucket.get_blob(source)
         blob.download_to_filename(dest)
+
+    def load_csv_file_dict(self):
+        df = pd.read_csv('gs://ir_proj_205888886/pr.csv')
+        return df.to_dict()
